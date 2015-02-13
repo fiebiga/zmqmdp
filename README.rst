@@ -1,4 +1,4 @@
-ZeroMQ Majordomo Protocal
+ZeroMQ Majordomo Protocol
 ========
 
 What?
