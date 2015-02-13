@@ -1,4 +1,4 @@
-Compysition
+ZeroMQ Majordomo Protocal
 ========
 
 What?
