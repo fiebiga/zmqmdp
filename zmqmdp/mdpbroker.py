@@ -1,18 +1,31 @@
-"""
-Majordomo Protocol broker
-A minimal implementation of http:#rfc.zeromq.org/spec:7 and spec:8
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+#
+#  mdpbroker.py
+#
+#  Copyright 2014 Adam Fiebig <fiebig.adam@gmail.com>
+#
+#  This program is free software; you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation; either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program; if not, write to the Free Software
+#  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
+#  MA 02110-1301, USA.
+#
 
-Author: Min RK <benjaminrk@gmail.com>
-Based on Java example by Arkadiusz Orzechowski
-"""
-
+import logging
 import sys
 import gevent
-from random import randint
 import time
-from binascii import hexlify
 from util.mdpregistrar import BrokerRegistrator
-from compysition import Actor
 import zmq.green as zmq
 import util.mdpdefinition as MDPDefinition
 from uuid import uuid4 as uuid
@@ -68,38 +81,36 @@ class Worker(object):
         return "{0}_receiver".format(address)
 
 
-class MajorDomoBroker(Actor):
+class MDPBroker(object):
     """
     Majordomo Protocol broker
     A minimal implementation of http:#rfc.zeromq.org/spec:7 and spec:8
     """
 
-    HEARTBEAT_LIVENESS = 3 # 3-5 is reasonable
-    HEARTBEAT_INTERVAL = 2500 # msecs
+    HEARTBEAT_LIVENESS = 3
+    HEARTBEAT_INTERVAL = 2500
     HEARTBEAT_EXPIRY = HEARTBEAT_INTERVAL * HEARTBEAT_LIVENESS
 
     # ---------------------------------------------------------------------
 
-    context = None # Our context
-    router_socket = None # Socket for clients & workers
-    poller = None # our Poller
+    context = None
+    router_socket = None 
+    poller = None           # our Poller
 
-    heartbeat_at = None # When to send HEARTBEAT
-    services = None # Known Services, either requested by a client or registered as ready by a worker
-    workers = None # Known Workers. This global list is maintained for ease of determining whether or not a worker has been registered
+    heartbeat_at = None     # When to send HEARTBEAT
+    services = None         # Known Services, either requested by a client or registered as ready by a worker
+    workers = None          # Known Workers. This global list is maintained for ease of determining whether or not a worker has been registered
 
-    registrator = None # Registrator for client broker load balancing
+    registrator = None      # Registrator for client broker load balancing
 
     broker_identity = None
 
     # ---------------------------------------------------------------------
 
 
-    def __init__(self, name, port=5555, *args, **kwargs):
+    def __init__(self, port=5555, logger=None, *args, **kwargs):
         """Initialize broker state."""
-        super(MajorDomoBroker, self).__init__(name, *args, **kwargs)
         self.port = port
-        #self.broker_identity = hexlify(b"%04x-%04x-%04x" % (randint(0, 0x10000), randint(0, 0x10000), randint(0, 0x10000)))
         self.broker_identity = uuid().get_hex()
         self.services = {}
         self.workers = {}
@@ -110,13 +121,23 @@ class MajorDomoBroker(Actor):
         self.poller = zmq.Poller()
         self.poller.register(self.broker_socket, zmq.POLLIN)
 
+        if logger:
+            self.logger = logger
+        else:
+            self.logger = logging.getLogger()
+            self.logger.setLevel(logging.DEBUG)
+            stdout_handler = logging.StreamHandler(sys.stdout)
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            stdout_handler.setFormatter(formatter)
+            self.logger.addHandler(stdout_handler)
+
         self.logger.info("MajorDomoBroker {0} initialized. Client/Worker ID will be {1}".format(self.broker_identity, self.broker_identity))
 
     # ---------------------------------------------------------------------
 
     def mediate(self):
         """Main broker work happens here"""
-        while self.loop():
+        while True:
             try:
                 items = self.poller.poll(self.HEARTBEAT_INTERVAL)
             except KeyboardInterrupt:
@@ -166,10 +187,10 @@ class MajorDomoBroker(Actor):
             service = message.pop(0)
             service = self.get_or_create_service(service)
             request_id = message[0]
-            self.logger.info("Received client request for service {0} ({1} waiting workers)".format(service.name, len(service.workers)), event_id=request_id)
+            self.logger.info("Received client request for service {0} ({1} waiting workers)".format(service.name, len(service.workers)), log_entry_id=request_id)
             # Set reply return address to client sender
             message = [sender,''] + message
-            self.dispatch(service, message=message, id=request_id)
+            self.dispatch(service, message=message, log_entry_id=request_id)
         elif command == MDPDefinition.B_VERIFICATION_REQUEST:
             self.logger.info("Received verification request from upstream client {0}".format(sender))
             self.broker_socket.send_multipart([b"{0}_receiver".format(sender), '', MDPDefinition.C_CLIENT, MDPDefinition.B_VERIFICATION_RESPONSE, self.broker_identity])
@@ -208,7 +229,7 @@ class MajorDomoBroker(Actor):
             client = b"{0}_receiver".format(msg.pop(0))
             request_id = msg[1]
             msg = [client, '', MDPDefinition.C_CLIENT, MDPDefinition.W_REPLY] + msg
-            self.logger.info("Received worker response, routing to waiting client...", event_id=request_id)
+            self.logger.info("Received worker response, routing to waiting client...", log_entry_id=request_id)
             self.broker_socket.send_multipart(msg)
 
         elif (MDPDefinition.W_HEARTBEAT == command):
@@ -292,7 +313,7 @@ class MajorDomoBroker(Actor):
 
         del self.workers[worker.identity]
 
-    def dispatch(self, service, message=None, id=None):
+    def dispatch(self, service, message=None, log_entry_id=None):
         """
         Dispatch requests to waiting workers as possible. This will flush an entire service queue if backed up requests exist for a previously workerless service if a
         new worker for that service is connected 
@@ -331,7 +352,7 @@ class MajorDomoBroker(Actor):
                     self.send_to_worker(worker, MDPDefinition.W_REQUEST, message=message)
         else:
             if message is not None:                                                 # Only log once, when a new message is received
-                self.logger.error("Request for service {0} has no waiting healthy workers, placing in holding queue. Queue size is {1}.".format(service.name, len(service.requests)), event_id=id)
+                self.logger.error("Request for service {0} has no waiting healthy workers, placing in holding queue. Queue size is {1}.".format(service.name, len(service.requests)), log_entry_id=log_entry_id)
 
 
     def send_to_worker(self, worker, command, message=None, worker_identity=None, *args, **kwargs):
@@ -349,7 +370,7 @@ class MajorDomoBroker(Actor):
 
         self.broker_socket.send_multipart(message)
 
-    def preHook(self):
+    def start(self):
         self.bind(self.port)
         gevent.spawn(self.mediate)
 

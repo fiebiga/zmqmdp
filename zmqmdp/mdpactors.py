@@ -1,15 +1,36 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+#
+#  mdpactors.py
+#
+#  Copyright 2014 Adam Fiebig <fiebig.adam@gmail.com>
+#
+#  This program is free software; you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation; either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program; if not, write to the Free Software
+#  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
+#  MA 02110-1301, USA.
+#
+
+from __future__ import print_function
+import sys
+import logging
 import zmq.green as zmq
 from util.mdpregistrar import BrokerManager
 import gevent
 from gevent.queue import Queue
-from compysition import Actor
-from random import randint
 from uuid import uuid4 as uuid
 from ast import literal_eval
 import util.mdpdefinition as MDPDefinition
-import time
-from pprint import pprint
-from binascii import hexlify
 
 """
 The MDPWorker and MDPClient are implementations of the ZeroMQ MajorDomo configuration, which deals with dynamic process routing based on service configuration and registration.
@@ -19,7 +40,7 @@ Also required for this implementation to function is a process or actor running 
 TODO: Frame documentation
 """
 
-class MDPActor(Actor):
+class MDPComponent(object):
 
     """
     Receive or send events over ZMQ
@@ -30,14 +51,23 @@ class MDPActor(Actor):
     socket_identity = None
     outbound_queue = None
 
-    def __init__(self, name, *args, **kwargs):
-        Actor.__init__(self, name, *args, **kwargs)
+    def __init__(self, logger=None, *args, **kwargs):
+        if logger:
+            self.logger = logger
+        else:
+            self.logger = logging.getLogger()
+            self.logger.setLevel(logging.DEBUG)
+            stdout_handler = logging.StreamHandler(sys.stdout)
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            stdout_handler.setFormatter(formatter)
+            self.logger.addHandler(stdout_handler)
+
         self.socket_identity = uuid().get_hex()
         self.context = zmq.Context()
         self.outbound_queue = Queue()
-        self.broker_manager = BrokerManager(controller_identity=self.socket_identity, logging=self.logger)
+        self.broker_manager = BrokerManager(controller_identity=self.socket_identity, logger=self.logger)
 
-    def preHook(self):
+    def start(self):
         gevent.spawn(self.__listen)
         gevent.spawn(self.__consume_outbound_queue)
         gevent.spawn(self.verify_brokers)
@@ -46,7 +76,7 @@ class MDPActor(Actor):
         self.outbound_queue.put(event)
 
     def __consume_outbound_queue(self):
-        while self.loop():
+        while True:
             try:
                 event = self.outbound_queue.get(timeout=2.5)
             except:
@@ -64,7 +94,7 @@ class MDPActor(Actor):
             self.send_heartbeats()
 
     def __listen(self):
-        while self.loop():
+        while True:
             try:
                 polled_sockets = dict(self.broker_manager.inbound_poller.poll())
             except KeyboardInterrupt:
@@ -94,25 +124,25 @@ class MDPActor(Actor):
     def send_heartbeats(self):
         raise NotImplementedError("Please Implement method 'send_heartbeats'")
 
-class MDPClient(MDPActor):
+class MDPClient(MDPComponent):
 
     client = None
 
-    def __init__(self, name, *args, **kwargs):
-        super(MDPClient, self).__init__(name, *args, **kwargs)
+    def __init__(self, *args, **kwargs):
+        super(MDPClient, self).__init__(*args, **kwargs)
 
     def send_outbound_message(self, socket, event):
         try:
-            request_id = event['header']['event_id'] # Set for broker logging so we can trace the path of an event easily
+            request_id = event['header'].get("meta_id", None) or event['header']['event_id'] # Set for broker logging so we can trace the path of an event easily
             service = event['header']['service']
-            self.logger.info("Sending event to service '{0}'".format(service), event_id=event['header']['event_id'])
+            self.logger.info("Sending event to service '{0}'".format(service), event=event)
             message = [request_id, b"{0}".format(event)]
             self.send(service, message, broker_socket=socket)
         except Exception as err:
             self.logger.error("Unable to find necessary chains: {0}".format(err))
 
     def verify_brokers(self):
-        while self.loop():
+        while True:
             self.broker_manager.send_verification_requests(MDPDefinition.C_CLIENT)
             gevent.sleep(1)
 
@@ -136,7 +166,7 @@ class MDPClient(MDPActor):
                 request_identity = message.pop(0)
 
                 event = literal_eval(message[0])
-                self.logger.info("Received reply from broker", event_id=event['header']['event_id'])
+                self.logger.info("Received reply from broker", event=event)
                 self.send_event(event)
 
     def set_broker(self, broker_socket=None):
@@ -164,18 +194,18 @@ class MDPClient(MDPActor):
     def send_heartbeats(self):
         pass
 
-class MDPWorker(MDPActor):
+class MDPWorker(MDPComponent):
 
     service = None
     requests = None
 
-    def __init__(self, name, service, *args, **kwargs):
-        super(MDPWorker, self).__init__(name, *args, **kwargs)
+    def __init__(self, service, *args, **kwargs):
+        super(MDPWorker, self).__init__(*args, **kwargs)
         self.service = service
         self.requests = {}
 
     def verify_brokers(self):
-        while self.loop():
+        while True:
             self.broker_manager.send_verification_requests(MDPDefinition.W_WORKER, message=self.service)
             gevent.sleep(1)
 
@@ -194,11 +224,11 @@ class MDPWorker(MDPActor):
             if command == MDPDefinition.W_REQUEST:
                 return_address = message.pop(0)
                 empty = message.pop(0)
-                request_id = message.pop(0)
+                broker_event_logging_id = message.pop(0)
                 event = literal_eval(message.pop(0))
 
+                request_id = event['header']['event_id']
                 self.requests[request_id] = Request(return_address, origin_broker)
-
                 self.send_event(event)
 
             elif command == MDPDefinition.B_VERIFICATION_RESPONSE:
@@ -214,24 +244,24 @@ class MDPWorker(MDPActor):
                 pass
 
     def send_outbound_message(self, socket, event):
-        request_id = event['header']['wsgi']['request_id']
+        request_id = event['header']['event_id']
         request = self.requests.get(request_id)
 
         if request is not None:
             broker = request.origin_broker
             return_address = request.return_address
-
-            message = ['', MDPDefinition.W_WORKER, MDPDefinition.W_REPLY, return_address, '', event['header']['event_id'], b"{0}".format(event)]
+            broker_event_logging_id = event['header'].get("meta_id", None) or event['header']['event_id']
+            message = ['', MDPDefinition.W_WORKER, MDPDefinition.W_REPLY, return_address, '', broker_event_logging_id, b"{0}".format(event)]
 
             if broker is not None:                  # Prioritize the originating broker first
                 try:
                     broker.outbound_socket.send_multipart(message)
-                    self.logger.info("Sent reply through originating broker", event_id=event['header']['event_id'])
+                    self.logger.info("Sent reply through originating broker", event=event)
                 except zmq.ZMQError:
                     socket.send_multipart(message)  # Use the current broker in the round-robin rotation
-                    self.logger.info("Sent reply through non-originating broker", event_id=event['header']['event_id'])
+                    self.logger.info("Sent reply through non-originating broker", event=event)
         else:
-            self.logger.error("Received event response but was unable to find client return address: {0}".format(event), event_id=event['header']['event_id'])
+            self.logger.error("Received event response but was unable to find client return address: {0}".format(event), event=event)
 
 
     def send_heartbeats(self):

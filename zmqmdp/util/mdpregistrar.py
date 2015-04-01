@@ -1,3 +1,28 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+#
+#  mdpregistrar.py
+#
+#  Copyright 2014 Adam Fiebig <fiebig.adam@gmail.com>
+#
+#  This program is free software; you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation; either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program; if not, write to the Free Software
+#  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
+#  MA 02110-1301, USA.
+#
+
+import logging
+import sys
 import gevent
 import zmq.green as zmq
 import time
@@ -151,7 +176,7 @@ class BrokerManager(RegistrationService):
     verification_manager = None
     
 
-    def __init__(self, controller_identity=None, logging=None, *args, **kwargs):
+    def __init__(self, controller_identity=None, logger=None, *args, **kwargs):
         RegistrationService.__init__(self, *args, **kwargs)
 
         self.controller_identity = controller_identity or kwargs.get('controller_identity', None)
@@ -164,7 +189,15 @@ class BrokerManager(RegistrationService):
         self.unverified_brokers = {}
         self.inbound_sockets = []
 
-        self.logger = logging
+        if logger:
+            self.logger = logger
+        else:
+            self.logger = logging.getLogger()
+            self.logger.setLevel(logging.DEBUG)
+            stdout_handler = logging.StreamHandler(sys.stdout)
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            stdout_handler.setFormatter(formatter)
+            self.logger.addHandler(stdout_handler)
 
         self.inbound_poller = zmq.Poller()
 
@@ -200,8 +233,7 @@ class BrokerManager(RegistrationService):
         elif command == MDPDefinition.B_DISCONNECT:
             broker_identity = message.pop(0)
             broker_address = message.pop(0)
-            if self.logger is not None:
-                self.logger.info("Received a disconnect command for broker {0} from registration service".format(broker_identity))
+            self.logger.info("Received a disconnect command for broker {0} from registration service".format(broker_identity))
 
             self.disconnect_broker(broker_identity)
 
@@ -265,18 +297,15 @@ class BrokerManager(RegistrationService):
             for broker in self.unverified_brokers.values():
                 if(broker.verification_attempts >= 3):
                     if(broker.reconnect_attempts >= 3):
-                        if self.logger is not None:
-                            self.logger.info("Unable to verify broker {0}. Disconnecting permanently...".format(broker.identity))
+                        self.logger.info("Unable to verify broker {0}. Disconnecting permanently...".format(broker.identity))
                         self.disconnect_broker(broker.identity)
                     else:
-                        if self.logger is not None:
-                            self.logger.info("Broker {0} is unresponsive to verification attempts, attempting to reconnect... (Number of reconnect attempts: {1})".format(broker.identity, broker.reconnect_attempts))
+                        self.logger.info("Broker {0} is unresponsive to verification attempts, attempting to reconnect... (Number of reconnect attempts: {1})".format(broker.identity, broker.reconnect_attempts))
                         self.reconnect_broker(broker)
                 else:
                     broker_sockets.append(broker.outbound_socket)
                     broker.increment_verification_attempts()
-                    if self.logger is not None:
-                        self.logger.info("Sending verification request to broker {0} (Number of verification attempts: {1})".format(broker.identity, broker.verification_attempts))
+                    self.logger.info("Sending verification request to broker {0} (Number of verification attempts: {1})".format(broker.identity, broker.verification_attempts))
 
             if len(broker_sockets) > 0:
                 self.verification_manager.send_heartbeats(broker_sockets, message)
@@ -287,21 +316,18 @@ class BrokerManager(RegistrationService):
             broker = self.unverified_brokers.pop(broker_identity)
             broker.verified = True
             self.verified_brokers[broker_identity] = broker
-            if self.logger is not None:
-                self.logger.info("Verified Broker {0}".format(broker.identity))
+            self.logger.info("Verified Broker {0}".format(broker.identity))
            
     def connect_broker(self, broker):
         self.unverified_brokers[broker.identity] = broker
         self.inbound_poller.register(broker.inbound_socket, zmq.POLLIN)
-        if self.logger is not None:
-            self.logger.info("Connected new broker {0} at port {1}".format(broker.identity, broker.port))
+        self.logger.info("Connected new broker {0} at port {1}".format(broker.identity, broker.port))
 
     def reconnect_broker(self, broker):
         if (broker.inbound_socket, zmq.POLLIN) in self.inbound_poller.sockets:
                 self.inbound_poller.unregister(broker.inbound_socket)
         broker.reconnect()
-        if self.logger is not None:
-            self.logger.info("Reconnecting broker {0}".format(broker.identity))
+        self.logger.info("Reconnecting broker {0}".format(broker.identity))
         self.inbound_poller.register(broker.inbound_socket, zmq.POLLIN)
             
     def disconnect_broker(self, broker_identity):
@@ -315,8 +341,7 @@ class BrokerManager(RegistrationService):
             broker = self.unverified_brokers.pop(broker_identity, None)
 
         if broker is not None:
-            if self.logger is not None:
-                self.logger.info("Disconnecting broker {0}".format(broker.identity))
+            self.logger.info("Disconnecting broker {0}".format(broker.identity))
 
             if (broker.inbound_socket, zmq.POLLIN) in self.inbound_poller.sockets:
                 self.inbound_poller.unregister(broker.inbound_socket)

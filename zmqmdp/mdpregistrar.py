@@ -1,12 +1,37 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+#
+#  mdpregistrar.py
+#
+#  Copyright 2014 Adam Fiebig <fiebig.adam@gmail.com>
+#
+#  This program is free software; you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation; either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program; if not, write to the Free Software
+#  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
+#  MA 02110-1301, USA.
+#
+
+from __future__ import print_function
+import sys
 import gevent
 import zmq.green as zmq
+import logging
 import time
 from binascii import hexlify
 import util.mdpdefinition as MDPDefinition
-from compysition import Actor
 from util.mdpregistrar import HeartbeatManager, RegistrationService, Broker
 
-class BrokerRegistrationService(Actor, RegistrationService):
+class BrokerRegistrationService(RegistrationService):
     """
     This service is the standalone service the brokers configuration notification between active brokers and clients, so that the clients can round-robin between brokers to evenly
     distribute load. Implementors of this service should use the 'BrokerRegistrator' class on the broker end, and the 'RegistrationServiceListener' class on the client end to register or listen for 
@@ -20,10 +45,19 @@ class BrokerRegistrationService(Actor, RegistrationService):
     brokers = None
     heartbeat_manager = None
 
-    def __init__(self, name, listen_port=None, publish_port=None, *args, **kwargs):
-
-        Actor.__init__(self, name, *args, **kwargs)
+    def __init__(self, listen_port=None, publish_port=None, logger=None, *args, **kwargs):
         RegistrationService.__init__(self, *args, **kwargs)
+
+        if logger:
+            self.logger = logger
+        else:
+            self.logger = logging.getLogger()
+            self.logger.setLevel(logging.DEBUG)
+            stdout_handler = logging.StreamHandler(sys.stdout)
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            stdout_handler.setFormatter(formatter)
+            self.logger.addHandler(stdout_handler)
+
         self.brokers = {}
 
         if listen_port is not None:
@@ -38,9 +72,8 @@ class BrokerRegistrationService(Actor, RegistrationService):
         self.client_publisher_socket = self.context.socket(zmq.PUB)
         self.client_publisher_socket.bind("tcp://*:{0}".format(self.registration_publisher_port))
 
-        gevent.sleep(0.1) # Make sure publisher has time to fully connect. This is a zmq nuance
+        gevent.sleep(0.1)       # Make sure publisher has time to fully connect. This is a zmq nuance
         
-        #self.heartbeat_manager = HeartbeatManager(heartbeat_interval=self.timeout)
         self.poller = zmq.Poller()
         self.poller.register(self.receiver_socket, zmq.POLLIN)
 
@@ -100,7 +133,7 @@ class BrokerRegistrationService(Actor, RegistrationService):
         The main work of the service is done here - poll for incoming messages, and initiate liveness checks
         heartbeat broadcasts
         """
-        while self.loop():
+        while True:
             items = self.poller.poll(self.timeout)
             if items:
                 message = self.receiver_socket.recv_multipart()
@@ -124,7 +157,6 @@ class BrokerRegistrationService(Actor, RegistrationService):
                 self.forward_broker_heartbeats(broker=broker)
 
             self.check_broker_liveness()
-            #self.forward_broker_heartbeats()
 
-    def preHook(self):
+    def start(self):
         gevent.spawn(self.start_service)
